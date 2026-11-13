@@ -1,7 +1,8 @@
 """Run ONLY against a fresh disposable PHP 8.4/MySQL 8.4 test installation.
 No production credentials, mail, personal data or external services are used.
 """
-import os,json,time,urllib.request,urllib.error,http.cookiejar,urllib.parse,re,subprocess
+import os,json,time,urllib.request,urllib.error,http.cookiejar,urllib.parse,re,subprocess,base64
+from pathlib import Path
 BASE=os.environ.get('BRIDGE_TEST_URL','http://127.0.0.1:8890')
 PASSWORD='Test-password-only-4827'
 class Client:
@@ -31,6 +32,16 @@ assert len(admin_code)==71
 assert admin.login('organizer')['role']=='admin'
 t=int(time.time()*1000)
 c=admin.call('course_save',{'title':'Тестовый курс','description':'Проверка общей базы','code':'PRIVATE-GROUP','end':t+40*86400000})['id']
+# Course pictures fit the existing schema and survive ordinary metadata edits.
+image='data:image/webp;base64,'+base64.b64encode((Path(__file__).parents[1]/'public_html/assets/fish.webp').read_bytes()).decode()
+admin.call('course_save',{'id':c,'title':'Тестовый курс','description':'Проверка общей базы','code':'PRIVATE-GROUP','end':t+40*86400000,'image_data':image})
+stored=next(x['image']for x in admin.call('state')['courses']if x['id']==c)
+assert re.fullmatch(r'[a-f0-9]{20}\.webp',stored) and len(stored)<=30
+admin.call('course_save',{'id':c,'title':'Тестовый курс','description':'Проверка общей базы','code':'PRIVATE-GROUP','end':t+40*86400000})
+assert next(x['image']for x in admin.call('state')['courses']if x['id']==c)==stored
+admin.call('course_save',{'id':c,'title':'Тестовый курс','description':'Проверка общей базы','code':'PRIVATE-GROUP','end':t+40*86400000,'image_data':'data:image/png;base64,PD9waHA='},status=422)
+admin.call('course_save',{'id':c,'title':'Тестовый курс','description':'Проверка общей базы','code':'PRIVATE-GROUP','end':t+40*86400000,'remove_image':True})
+assert next(x['image']for x in admin.call('state')['courses']if x['id']==c)=='hero'
 c2=admin.call('course_save',{'title':'Другая группа','description':'','code':'OTHER-GROUP','end':t+40*86400000})['id']
 def lesson(title,start,end,cid=c):
  return admin.call('lesson_save',{'course':cid,'title':title,'start':start,'end':end,'teacher':'Тестовый преподаватель','address':'Аудитория','url':'','description':'Тест','homework':'Опишите свой шаг','cancelled':False})['id']
@@ -38,6 +49,12 @@ live=lesson('Текущая встреча',t-1800000,t+1800000)
 after=lesson('После занятия',t-7200000,t-3600000)
 expired=lesson('48 часов прошли',t-51*3600000,t-49*3600000)
 foreign=lesson('Чужая встреча',t-1800000,t+1800000,c2)
+# Administrator never self-enrolls or submits student attendance/homework/feedback.
+admin.call('join',{'code':'PRIVATE-GROUP'},status=403)
+admin.call('attendance',{'lesson':live,'format':'online'},status=403)
+admin.call('homework',{'lesson':after,'answer':'Не студент'},status=403)
+admin.call('feedback',{'lesson':after,'takeaway':'Не студент','visibility':'private'},status=403)
+
 a=Client();ar=a.register('student-a','Студент А');u=ar['user'];acode=ar['recovery_code']
 b=Client();br=b.register('student-b','Студент Б');v=br['user']
 assert ar['user']['role']=='student' and 'email' not in ar['user']

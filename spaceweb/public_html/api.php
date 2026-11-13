@@ -21,6 +21,7 @@ try {
  if($method!=='POST'&&$action!=='state')fail('Неподдерживаемый метод',405);
  auth_action($action,$input);
  $u=user();
+ if($u['role']==='admin'&&in_array($action,['join','attendance','homework','feedback'],true))fail('Это действие доступно участникам — организатор управляет курсом отдельно',403);
  if($action==='logout'){$_SESSION=[];session_destroy();respond(['ok'=>true]);}
  if($action==='profile'){q('UPDATE bridge_users SET name=? WHERE id=?',[field($input,'name',100,true),$u['id']]);respond(['ok'=>true]);}
  if($action==='state'){
@@ -113,7 +114,20 @@ try {
   $id=field($input,'id',40)?:uid();$title=field($input,'title',150,true);$desc=field($input,'description');$code=field($input,'code',80,true);$end=(int)($input['end']??0);if($end<=0)fail('Укажите окончание курса');
   if(one('SELECT id FROM bridge_lessons WHERE course_id=? AND end_at>?',[$id,$end]))fail('Курс не может закончиться раньше занятия');
   $other=one('SELECT id FROM bridge_courses WHERE code=? AND id<>?',[$code,$id]);if($other)fail('Код уже используется другим курсом');
-  q("INSERT INTO bridge_courses(id,title,description,code,end_at,image) VALUES(?,?,?,?,?,'hero') ON DUPLICATE KEY UPDATE title=VALUES(title),description=VALUES(description),code=VALUES(code),end_at=VALUES(end_at)",[$id,$title,$desc,$code,$end]);respond(['id'=>$id]);
+  $existing=one('SELECT image FROM bridge_courses WHERE id=?',[$id]);
+  $image=!empty($input['remove_image'])?'hero':($existing['image']??'hero');
+  if(!empty($input['image_data'])){
+   $raw=field($input,'image_data',800000);
+   if(!preg_match('#^data:image/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$#',$raw,$m))fail('Выберите PNG, JPG или WebP');
+   $bytes=base64_decode($m[2],true);$info=$bytes!==false?@getimagesizefromstring($bytes):false;
+   if(!$info||strlen($bytes)>2000000||$info[0]>2000||$info[1]>2000||!in_array($info['mime'],['image/png','image/jpeg','image/webp'],true))fail('Картинка слишком большая или имеет неверный формат');
+   $ext=['image/png'=>'png','image/jpeg'=>'jpg','image/webp'=>'webp'][$info['mime']];
+   $dir=__DIR__.'/uploads';if(!is_dir($dir)&&!mkdir($dir,0755,true))throw new RuntimeException('Image directory unavailable');
+   // 20 hex characters + extension fits the already installed VARCHAR(30).
+   $image=bin2hex(random_bytes(10)).'.'.$ext;
+   if(file_put_contents($dir.'/'.$image,$bytes)===false)throw new RuntimeException('Image storage failed');
+  }
+  q('INSERT INTO bridge_courses(id,title,description,code,end_at,image) VALUES(?,?,?,?,?,?) ON DUPLICATE KEY UPDATE title=VALUES(title),description=VALUES(description),code=VALUES(code),end_at=VALUES(end_at),image=VALUES(image)',[$id,$title,$desc,$code,$end,$image]);respond(['id'=>$id]);
  }
  if($action==='lesson_save'){
   $id=field($input,'id',40)?:uid();$cid=field($input,'course',40,true);$c=one('SELECT * FROM bridge_courses WHERE id=?',[$cid]);if(!$c)fail('Сначала создайте курс');
