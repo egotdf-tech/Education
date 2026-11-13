@@ -18,5 +18,5 @@ foreach(rows('SELECT id,body,attempts FROM bridge_outbox WHERE sent_at IS NULL A
 }
 // Retain operational records for a bounded period, never message text in logs.
 q('DELETE FROM bridge_outbox WHERE sent_at IS NOT NULL AND sent_at<?',[clock_ms()-30*86400000]);
-q('DELETE FROM bridge_otp WHERE expires_at<?',[clock_ms()-86400000]);
+// Mail OTP is no longer used; legacy records can expire without delivery.
 q('DELETE FROM bridge_limits WHERE expires_at<?',[time()-86400]);

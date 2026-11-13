@@ -7,6 +7,7 @@ header('Referrer-Policy: same-origin');
 header('X-Frame-Options: DENY');
 try {
  require dirname(__DIR__).'/bridge-app/bootstrap.php';
+ require dirname(__DIR__).'/bridge-app/auth.php';
  $config=config();
  if(($config['environment']??'production')!=='test'&&empty($_SERVER['HTTPS'])&&($_SERVER['HTTP_X_FORWARDED_PROTO']??'')!=='https')fail('Откройте сайт через HTTPS',400);
  session_boot();
@@ -16,35 +17,9 @@ try {
   if((int)($_SERVER['CONTENT_LENGTH']??0)>3500000)fail('Слишком большой запрос',413);
   $input=json_decode(file_get_contents('php://input'),true);if(!is_array($input))fail('Неверный формат запроса');
  }else{$input=[];}
- if($action==='session')respond(['user'=>isset($_SESSION['user_id'])?user():null,'csrf'=>$_SESSION['csrf'],'server_time'=>clock_ms()]);
+ if($action==='session')respond(['user'=>session_user()?:null,'csrf'=>$_SESSION['csrf'],'server_time'=>clock_ms()]);
  if($method!=='POST'&&$action!=='state')fail('Неподдерживаемый метод',405);
- if($action==='request_code'){
-  $email=strtolower(field($input,'email',190,true));$name=field($input,'name',100,true);
-  if(!filter_var($email,FILTER_VALIDATE_EMAIL)||preg_match('/[\r\n]/',$email))fail('Проверьте адрес почты');
-  rate('login:ip:'.($_SERVER['REMOTE_ADDR']??''),120,900);rate('login:email:'.$email,4,900);
-  $code=(string)random_int(100000,999999);$id=bin2hex(random_bytes(32));
-  q('DELETE FROM bridge_otp WHERE expires_at<?',[clock_ms()-86400000]);
-  q('UPDATE bridge_otp SET used=1 WHERE email=?',[$email]);
-  q('INSERT INTO bridge_otp(id,email,name,code_hash,expires_at,created_at) VALUES(?,?,?,?,?,?)',[$id,$email,$name,hash_hmac('sha256',$id.':'.$code,$config['app_secret']),clock_ms()+600000,clock_ms()]);
-  try{send_code($email,$code);}catch(Throwable $e){q('UPDATE bridge_otp SET used=1 WHERE id=?',[$id]);fail('Письмо не удалось отправить — обратитесь к организатору',503);}
-  respond(['request_id'=>$id]);
- }
- if($action==='verify_code'){
-  rate('verify:ip:'.($_SERVER['REMOTE_ADDR']??''),300,900);
-  $id=field($input,'request_id',64,true);$code=field($input,'code',6,true);
-  $result=transaction(function()use($id,$code,$config){
-   $r=one('SELECT * FROM bridge_otp WHERE id=? FOR UPDATE',[$id]);
-   if(!$r||$r['used']||$r['expires_at']<clock_ms()||$r['attempts']>=5)return false;
-   q('UPDATE bridge_otp SET attempts=attempts+1 WHERE id=?',[$id]);
-   if(!hash_equals($r['code_hash'],hash_hmac('sha256',$id.':'.$code,$config['app_secret'])))return false;
-   q('UPDATE bridge_otp SET used=1 WHERE id=?',[$id]);
-   $role=strtolower($config['admin_email']??'')===$r['email']?'admin':'student';
-   q('INSERT INTO bridge_users(email,name,role,created_at) VALUES(?,?,?,?) ON DUPLICATE KEY UPDATE email=VALUES(email)',[$r['email'],$r['name'],$role,clock_ms()]);
-   return one('SELECT id FROM bridge_users WHERE email=?',[$r['email']])['id'];
-  });
-  if(!$result)fail('Код неверный, истёк или уже использован');
-  session_regenerate_id(true);$_SESSION['user_id']=$result;$_SESSION['csrf']=bin2hex(random_bytes(32));respond(['csrf'=>$_SESSION['csrf'],'user'=>user()]);
- }
+ auth_action($action,$input);
  $u=user();
  if($action==='logout'){$_SESSION=[];session_destroy();respond(['ok'=>true]);}
  if($action==='profile'){q('UPDATE bridge_users SET name=? WHERE id=?',[field($input,'name',100,true),$u['id']]);respond(['ok'=>true]);}
@@ -59,7 +34,7 @@ try {
   $normalizedCourses=array_map(function($c)use($u){$v=['id'=>$c['id'],'title'=>$c['title'],'description'=>$c['description'],'end'=>(int)$c['end_at'],'image'=>$c['image']];if($u['role']==='admin')$v['code']=$c['code'];return $v;},$courses);
   $data=['profile'=>$u,'csrf'=>$_SESSION['csrf'],'courses'=>$normalizedCourses,'lessons'=>array_map('normalized_lesson',$ls),'attendance'=>$attendance,'homework'=>$homework,'feedback'=>$feedback,'awards'=>$awards,'notifications'=>rows('SELECT id,lesson_id,body,is_read FROM bridge_notifications WHERE user_id=? ORDER BY id DESC LIMIT 100',[$u['id']]),'server_time'=>clock_ms()];
   if($u['role']==='admin'){
-   $data['students']=rows('SELECT u.id,u.name,u.email,m.course_id FROM bridge_memberships m JOIN bridge_users u ON u.id=m.user_id ORDER BY u.name');
+   $data['students']=rows('SELECT u.id,u.name,c.login,m.course_id FROM bridge_memberships m JOIN bridge_users u ON u.id=m.user_id LEFT JOIN bridge_credentials c ON c.user_id=u.id ORDER BY u.name');
    $data['all_attendance']=rows('SELECT * FROM bridge_attendance');$data['all_homework']=rows('SELECT * FROM bridge_homework');
    $data['outbox_pending']=(int)q('SELECT COUNT(*) FROM bridge_outbox WHERE sent_at IS NULL')->fetchColumn();
   }respond($data);
@@ -98,8 +73,42 @@ try {
   $text=field($input,'text',5000,true);
   transaction(function()use($id,$u,$text,$f,$l){q('INSERT INTO bridge_replies(feedback_id,user_id,body,created_at) VALUES(?,?,?,?)',[$id,$u['id'],$text,clock_ms()]);if($u['role']==='admin')add_notification($f['user_id'],$l['id'],'Организатор ответил на ваш отзыв: '.$l['title']);else queue_telegram('Новое сообщение · '.$u['name'].' · '.$l['title']."\n".config()['base_url']);});respond(['ok'=>true]);
  }
+ if($action==='change_password'){
+  rate('password-change:'.$u['id'],10,900);
+  $password=new_password($input);$current=$input['current_password']??'';
+  $result=transaction(function()use($u,$password,$current){
+   $r=one('SELECT * FROM bridge_credentials WHERE user_id=? FOR UPDATE',[$u['id']]);
+   if(!is_string($current)||strlen($current)>72||!password_verify($current,$r['password_hash']))return false;
+   q('UPDATE bridge_credentials SET password_hash=?,auth_version=auth_version+1,reset_hash=NULL,reset_expires_at=NULL WHERE user_id=?',[password_hash($password,PASSWORD_DEFAULT),$u['id']]);
+   return one('SELECT user_id,auth_version FROM bridge_credentials WHERE user_id=?',[$u['id']]);
+  });
+  if(!$result)fail('Текущий пароль неверный');establish_session($result);respond(['csrf'=>$_SESSION['csrf']]);
+ }
+ if($action==='rotate_recovery'){
+  rate('recovery-rotate:'.$u['id'],10,900);$current=$input['current_password']??'';$code=recovery_code();
+  $result=transaction(function()use($u,$current,$code){
+   $r=one('SELECT * FROM bridge_credentials WHERE user_id=? FOR UPDATE',[$u['id']]);
+   if(!is_string($current)||strlen($current)>72||!password_verify($current,$r['password_hash']))return false;
+   q('UPDATE bridge_credentials SET recovery_hash=?,auth_version=auth_version+1,reset_hash=NULL,reset_expires_at=NULL WHERE user_id=?',[recovery_hash($code),$u['id']]);
+   return one('SELECT user_id,auth_version FROM bridge_credentials WHERE user_id=?',[$u['id']]);
+  });
+  if(!$result)fail('Текущий пароль неверный');establish_session($result);respond(['csrf'=>$_SESSION['csrf'],'recovery_code'=>$code]);
+ }
  // All remaining operations are explicitly administrator-only.
  admin();
+ if($action==='admin_reset'){
+  rate('admin-reset:'.$u['id'],15,900);
+  $sid=(int)($input['student']??0);$current=$input['current_password']??'';
+  $self=one('SELECT password_hash FROM bridge_credentials WHERE user_id=?',[$u['id']]);
+  if(!is_string($current)||strlen($current)>72||!password_verify($current,$self['password_hash']))fail('Подтвердите ваш пароль');
+  $target=one('SELECT id,role FROM bridge_users WHERE id=?',[$sid]);
+  if(!$target||$target['role']!=='student')fail('Этот способ доступен только для восстановления студентов');
+  $code=recovery_code();$expires=clock_ms()+900000;
+  $changed=q('UPDATE bridge_credentials SET reset_hash=?,reset_expires_at=? WHERE user_id=?',[recovery_hash($code),$expires,$sid])->rowCount();
+  if(!$changed)fail('У аккаунта ещё нет логина — требуется отдельная миграция');
+  q("INSERT INTO bridge_audit(actor_id,subject_id,lesson_id,before_value,after_value,created_at) VALUES(?,?,'account-reset','', 'issued',?)",[$u['id'],$sid,clock_ms()]);
+  respond(['reset_code'=>$code,'expires_at'=>$expires]);
+ }
  if($action==='course_save'){
   $id=field($input,'id',40)?:uid();$title=field($input,'title',150,true);$desc=field($input,'description');$code=field($input,'code',80,true);$end=(int)($input['end']??0);if($end<=0)fail('Укажите окончание курса');
   if(one('SELECT id FROM bridge_lessons WHERE course_id=? AND end_at>?',[$id,$end]))fail('Курс не может закончиться раньше занятия');

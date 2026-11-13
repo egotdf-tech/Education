@@ -37,7 +37,14 @@ function session_boot(): void {
  if(isset($_SESSION['last_seen'])&&$_SESSION['last_seen']<time()-7200){$_SESSION=[];session_regenerate_id(true);}
  $_SESSION['last_seen']=time();$_SESSION['csrf']??=bin2hex(random_bytes(32));
 }
-function user(): array { $u=isset($_SESSION['user_id'])?one('SELECT id,email,name,role FROM bridge_users WHERE id=?',[$_SESSION['user_id']]):false;if(!$u)fail('Войдите в кабинет',401);return $u; }
+function session_user(): array|false {
+ $u=isset($_SESSION['user_id'])?one('SELECT u.id,u.name,u.role,c.login,c.auth_version FROM bridge_users u JOIN bridge_credentials c ON c.user_id=u.id WHERE u.id=?',[$_SESSION['user_id']]):false;
+ if(!$u||!isset($_SESSION['auth_version'])||(int)$u['auth_version']!==(int)$_SESSION['auth_version']){
+  unset($_SESSION['user_id'],$_SESSION['auth_version']);return false;
+ }
+ unset($u['auth_version']);return $u;
+}
+function user(): array { $u=session_user();if(!$u)fail('Войдите в кабинет',401);return $u; }
 function admin(): array {$u=user();if($u['role']!=='admin')fail('Доступ только организатору',403);return $u;}
 function member(string $course,array $u): void {if($u['role']!=='admin'&&!one('SELECT user_id FROM bridge_memberships WHERE user_id=? AND course_id=?',[$u['id'],$course]))fail('Курс недоступен',403);}
 function lesson(string $id,array $u): array {$l=one('SELECT l.*,c.end_at AS course_end FROM bridge_lessons l JOIN bridge_courses c ON c.id=l.course_id WHERE l.id=?',[$id]);if(!$l)fail('Занятие не найдено',404);member($l['course_id'],$u);return $l;}
@@ -48,18 +55,6 @@ function rate(string $key,int $max,int $seconds): void {
 }
 function add_notification(int|string $id,string $lesson,string $text): void {q('INSERT INTO bridge_notifications(user_id,lesson_id,body,created_at) VALUES(?,?,?,?)',[$id,$lesson,$text,clock_ms()]);}
 function queue_telegram(string $body): void {q('INSERT INTO bridge_outbox(body,available_at) VALUES(?,?)',[$body,clock_ms()]);}
-function send_code(string $email,string $code): void {
- $c=config();
- if(($c['environment']??'production')==='test'){
-  if(empty($c['test_mailbox']))throw new RuntimeException('Test mailbox required');
-  file_put_contents($c['test_mailbox'],json_encode(['email'=>$email,'code'=>$code])."\n",FILE_APPEND|LOCK_EX);return;
- }
- $from=$c['mail_from']??'';
- if(!filter_var($from,FILTER_VALIDATE_EMAIL)||preg_match('/[\r\n]/',$from))throw new RuntimeException('Mail sender not configured');
- $subject='=?UTF-8?B?'.base64_encode('БРИДЖ — код входа').'?=';
- $text="Ваш код входа: $code\n\nКод действует 10 минут и используется один раз\nЕсли вы не запрашивали вход, проигнорируйте письмо";
- if(!mail($email,$subject,$text,"From: $from\r\nContent-Type: text/plain; charset=UTF-8\r\nMIME-Version: 1.0"))throw new RuntimeException('Mail delivery unavailable');
-}
 function normalized_lesson(array $l): array {return ['id'=>$l['id'],'course'=>$l['course_id'],'title'=>$l['title'],'start'=>(int)$l['start_at'],'end'=>(int)$l['end_at'],'teacher'=>$l['teacher'],'address'=>$l['address'],'url'=>$l['url'],'description'=>$l['description'],'homework'=>$l['homework'],'image'=>$l['image'],'cancelled'=>(bool)$l['cancelled']];}
 function awards(int|string $userId,array $courses,array $lessons,array $attendance,array $homework,array $feedback): array {
  $out=[];

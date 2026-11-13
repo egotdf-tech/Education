@@ -1,7 +1,7 @@
 'use strict';
 const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)];
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let state=null,csrf='',activeCourse='',offset=0,toastTimer;
+let state=null,csrf='',activeCourse='',offset=0,toastTimer,recoveryPending=false;
 const creatures=[['Глаз да практика','hero'],['Тихий наблюдатель','observer'],['Рыба вне шаблона','fish'],['Не открывать до озарения','bottle'],['Совет неочевидных','owl']];
 const now=()=>Date.now()+offset;
 const fmt=(t,o={})=>new Intl.DateTimeFormat('ru-RU',{timeZone:'Asia/Yekaterinburg',...o}).format(Number(t));
@@ -22,10 +22,11 @@ async function api(action,data){
 function form(id,handler){const el=$(id);if(!el)return;el.onsubmit=async e=>{e.preventDefault();const button=$('button[type=submit],button:not([type])',el);if(button)button.disabled=true;try{await handler(Object.fromEntries(new FormData(el)),el);}catch(err){toast(err.message);}finally{if(button)button.disabled=false;}};}
 async function refresh(){state=await api('state');offset=state.server_time-Date.now();if(!course(activeCourse))activeCourse=state.courses[0]?.id||'';render();}
 function modal(title,content){$('#modal-title').textContent=title;$('#modal-content').innerHTML=content;if(!$('#modal').open)$('#modal').showModal();}
-function closeModal(){$('#modal').close();}
+function closeModal(){if(recoveryPending)return;$('#modal').close();}
 $('#close-modal').onclick=closeModal;
-$('#modal').onclick=e=>{if(e.target===$('#modal')){const b=e.target.getBoundingClientRect();if(e.clientX<b.left||e.clientX>b.right||e.clientY<b.top||e.clientY>b.bottom)closeModal();}};
-function showLogin(){state=null;$('#workspace').hidden=true;$('.sidebar').classList.add('auth-sidebar');$('#login-screen').hidden=false;if($('#modal').open)closeModal();}
+$('#modal').addEventListener('cancel',e=>{if(recoveryPending)e.preventDefault();});
+$('#modal').onclick=e=>{if(!recoveryPending&&e.target===$('#modal')){const b=e.target.getBoundingClientRect();if(e.clientX<b.left||e.clientX>b.right||e.clientY<b.top||e.clientY>b.bottom)closeModal();}};
+function showLogin(){state=null;$('#workspace').hidden=true;$('.sidebar').classList.add('auth-sidebar');$('#login-screen').hidden=false;if($('#modal').open&&!recoveryPending)closeModal();renderLogin('login');}
 function render(){
  $('#workspace').hidden=false;$('.sidebar').classList.remove('auth-sidebar');$('#login-screen').hidden=true;
  $('#organizer').hidden=$('#admin-nav').hidden=!isAdmin();
@@ -61,7 +62,7 @@ function openLesson(id){
 function adminPanel(){
  $('#admin-courses').innerHTML=state.courses.map(c=>`<div class="admin-course-line"><div><b>${esc(c.title)}</b><small>Код группы: ${esc(c.code)} · до ${date(c.end)}</small></div><button class="text-button" data-edit-course="${esc(c.id)}">Изменить курс</button></div>`).join('');
  const group=(state.students||[]).filter(s=>s.course_id===activeCourse),ls=lessons(activeCourse),allA=state.all_attendance,allH=state.all_homework;
- $('#admin-table').innerHTML=group.flatMap(s=>ls.map(l=>{const a=allA.find(x=>String(x.user_id)===String(s.id)&&x.lesson_id===l.id),h=allH.find(x=>String(x.user_id)===String(s.id)&&x.lesson_id===l.id);return `<tr><td>${esc(s.name)}<small>${esc(l.title)} · ${date(l.start)}</small></td><td><select data-attendance="${l.id}" data-student="${s.id}" aria-label="Посещение ${esc(s.name)}"><option value="">${l.cancelled?'Отменено':now()<l.end?'Ещё не состоялось':'Отсутствовал'}</option><option value="offline" ${a?.format==='offline'?'selected':''}>Очно</option><option value="online" ${a?.format==='online'?'selected':''}>Онлайн</option></select></td><td>${!l.homework?'Не задано':h?(Number(h.done)?'✓ Выполнено':'Ожидает проверки'):now()>=course(l.course).end?'Срок сдачи истёк':'Не отправлено'}</td><td>${h?`<button class="text-button" data-check="${l.id}" data-student="${s.id}">Проверить ДЗ</button>`:''}</td></tr>`;})).join('')||'<tr><td colspan="4">Участники появятся после присоединения по коду</td></tr>';
+ $('#admin-table').innerHTML=group.flatMap(s=>ls.map(l=>{const a=allA.find(x=>String(x.user_id)===String(s.id)&&x.lesson_id===l.id),h=allH.find(x=>String(x.user_id)===String(s.id)&&x.lesson_id===l.id);return `<tr><td>${esc(s.name)}<small>${esc(s.login||'Логин не назначен')}</small>${s.login?`<button class="text-button" data-admin-reset="${s.id}">Восстановить доступ</button>`:''}<small>${esc(l.title)} · ${date(l.start)}</small></td><td><select data-attendance="${l.id}" data-student="${s.id}" aria-label="Посещение ${esc(s.name)}"><option value="">${l.cancelled?'Отменено':now()<l.end?'Ещё не состоялось':'Отсутствовал'}</option><option value="offline" ${a?.format==='offline'?'selected':''}>Очно</option><option value="online" ${a?.format==='online'?'selected':''}>Онлайн</option></select></td><td>${!l.homework?'Не задано':h?(Number(h.done)?'✓ Выполнено':'Ожидает проверки'):now()>=course(l.course).end?'Срок сдачи истёк':'Не отправлено'}</td><td>${h?`<button class="text-button" data-check="${l.id}" data-student="${s.id}">Проверить ДЗ</button>`:''}</td></tr>`;})).join('')||'<tr><td colspan="4">Участники появятся после присоединения по коду</td></tr>';
  $('#admin-feedback').innerHTML='<h3>Занятия курса</h3>'+ls.map(l=>`<div class="admin-course-line"><span>${esc(l.title)}</span><span><button class="text-button" data-edit-lesson="${l.id}">Изменить</button><button class="text-button" data-copy-lesson="${l.id}">Копия</button></span></div>`).join('')+'<h3>Обратная связь</h3>'+state.feedback.filter(f=>ls.some(l=>l.id===f.lesson_id)).map(f=>`<article class="admin-review"><div class="eyebrow">${f.visibility==='public'?'ПУБЛИЧНЫЙ ОТЗЫВ':'ЛИЧНЫЙ ОТЗЫВ'}</div><h4>${esc(f.name)} · ${esc(state.lessons.find(l=>l.id===f.lesson_id)?.title)}</h4>${feedbackBody(f)}${conversation(f)}</article>`).join('');
  $('.telegram-note').textContent='Уведомления Telegram: '+state.outbox_pending+' в очереди · для доставки нужен настроенный обработчик на хостинге';
 }
@@ -74,7 +75,13 @@ function editLesson(id,copy=false){
 function resize(file){return new Promise((resolve,reject)=>{const url=URL.createObjectURL(file),im=new Image();im.onload=()=>{const ratio=Math.min(1,800/im.width,800/im.height),c=document.createElement('canvas');c.width=Math.round(im.width*ratio);c.height=Math.round(im.height*ratio);c.getContext('2d').drawImage(im,0,0,c.width,c.height);URL.revokeObjectURL(url);resolve(c.toDataURL('image/webp',.85));};im.onerror=()=>{URL.revokeObjectURL(url);reject(Error('Не удалось открыть картинку'));};im.src=url;});}
 function checkHomework(sid,id){const h=state.all_homework.find(h=>String(h.user_id)===String(sid)&&h.lesson_id===id);if(!h)return;modal('Проверка домашнего задания',`<p class="review-body">${esc(h.body)}</p><form id="check-form"><label class="field">Комментарий<textarea name="comment" maxlength="5000">${esc(h.comment)}</textarea></label><label class="choice"><input type="checkbox" name="done" ${Number(h.done)?'checked':''}>Выполнено — закрыть ответ для изменений</label><br><button class="button primary">Сохранить проверку</button></form>`);form('#check-form',async data=>{await api('check_homework',{...data,student:sid,lesson:id,done:data.done==='on'});await refresh();closeModal();toast('Проверка сохранена — студент получит уведомление');});}
 $('#join-button').onclick=()=>{modal('Добавить курс',`<p>Введите код вашей группы</p><form id="join-form"><label class="field">Код группы<input name="code" required maxlength="80" autocomplete="off"></label><button class="button primary">Присоединиться</button></form>`);form('#join-form',async data=>{const result=await api('join',data);activeCourse=result.course;await refresh();closeModal();toast('Курс добавлен');});};
-$('#profile-button').onclick=()=>{if(!state)return;modal('Ваш профиль',`<p>${esc(state.profile.email)}</p><form id="profile-form"><label class="field">Имя и фамилия<input name="name" required maxlength="100" value="${esc(state.profile.name)}"></label><button class="button primary">Сохранить</button></form>`);form('#profile-form',async data=>{await api('profile',data);await refresh();closeModal();});};
+$('#profile-button').onclick=()=>{
+ if(!state)return;
+ modal('Ваш профиль',`<p>Логин: <b>${esc(state.profile.login)}</b></p><form id="profile-form"><label class="field">Имя и фамилия<input name="name" required maxlength="100" value="${esc(state.profile.name)}"></label><button class="button primary">Сохранить имя</button></form><section class="modal-section"><h3>Сменить пароль</h3><form id="password-form"><label class="field">Текущий пароль<input name="current_password" type="password" required autocomplete="current-password"></label><label class="field">Новый пароль — минимум 12 символов<input name="password" type="password" required minlength="12" autocomplete="new-password"></label><button class="button outline">Сменить пароль</button><p class="form-hint">Остальные сеансы входа закроются</p></form></section><section class="modal-section"><h3>Новый код восстановления</h3><p class="form-hint">Старый код перестанет действовать — сохраните новый</p><form id="rotate-form"><label class="field">Подтвердите текущий пароль<input name="current_password" type="password" required autocomplete="current-password"></label><button class="button outline">Заменить код восстановления</button></form></section>`);
+ form('#profile-form',async data=>{await api('profile',data);await refresh();closeModal();});
+ form('#password-form',async data=>{await api('change_password',data);await refresh();closeModal();toast('Пароль изменён — другие сеансы закрыты');});
+ form('#rotate-form',async data=>{const result=await api('rotate_recovery',data);showRecovery(result.recovery_code,()=>refresh());});
+};
 $('#logout-button').onclick=async()=>{try{await api('logout',{});location.reload();}catch(e){toast(e.message);}};
 $('#read-all').onclick=async()=>{try{await api('read_notifications',{});await refresh();}catch(e){toast(e.message);}};
 $('#course-filter').onchange=e=>{activeCourse=e.target.value;schedule();if(isAdmin())adminPanel();};
@@ -83,8 +90,32 @@ $('#nearest-lesson').onclick=e=>{e.preventDefault();const ls=state.lessons.filte
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-course],[data-lesson],[data-edit-course],[data-edit-lesson],[data-copy-lesson],[data-check],[data-notification]');if(!b)return;try{if(b.dataset.course){activeCourse=b.dataset.course;$('#course-filter').value=activeCourse;schedule();if(isAdmin())adminPanel();location.hash='schedule';}if(b.dataset.lesson)openLesson(b.dataset.lesson);if(b.dataset.editCourse)editCourse(b.dataset.editCourse);if(b.dataset.editLesson)editLesson(b.dataset.editLesson);if(b.dataset.copyLesson)editLesson(b.dataset.copyLesson,true);if(b.dataset.check)checkHomework(b.dataset.student,b.dataset.check);if(b.dataset.notification){await api('read_notifications',{});await refresh();openLesson(b.dataset.notification);}}catch(err){toast(err.message);}});
 document.addEventListener('change',async e=>{if(!e.target.dataset.attendance)return;try{await api('admin_attendance',{lesson:e.target.dataset.attendance,student:e.target.dataset.student,format:e.target.value});await refresh();toast('Посещение исправлено');}catch(err){toast(err.message);await refresh();}});
 document.addEventListener('submit',async e=>{const id=e.target.dataset.reply;if(!id)return;e.preventDefault();const el=e.target,text=$('input',el).value.trim();if(!text)return;const b=$('button',el);b.disabled=true;try{const l=state.feedback.find(f=>f.id===id)?.lesson_id;await api('reply',{feedback:id,text});await refresh();if($('#modal').open&&l)openLesson(l);toast('Сообщение сохранено');}catch(err){toast(err.message);}finally{b.disabled=false;}});
-function startLogin(){form('#login-form',async data=>{const result=await api('request_code',data);$('#login-form').innerHTML=`<p>Код отправлен на ${esc(data.email)}</p><label class="field">Код из письма<input name="code" inputmode="numeric" pattern="[0-9]{6}" required maxlength="6" autocomplete="one-time-code"></label><button class="button primary">Войти</button><button class="text-button" type="button" id="restart-login">Ввести другую почту</button>`;$('#restart-login').onclick=()=>location.reload();form('#login-form',async code=>{await api('verify_code',{...code,request_id:result.request_id});await refresh();});});}
-(async()=>{showLogin();try{const s=await api('session');if(s.user)await refresh();else startLogin();}catch(err){$('#login-status').textContent=err.message;}})();
+function renderLogin(mode='login'){
+ const registration=mode==='register',recover=mode==='recover';
+ $('#login-status').textContent='';
+ $$('#auth-tabs button').forEach(b=>{b.classList.toggle('primary',b.dataset.auth===mode);b.classList.toggle('outline',b.dataset.auth!==mode);b.setAttribute('aria-pressed',String(b.dataset.auth===mode));});
+ $('#login-form').innerHTML=`${registration?'<label class="field">Имя и фамилия<input name="name" required maxlength="100" autocomplete="name"></label>':''}<label class="field">Логин<input name="login" required pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,31}" maxlength="32" autocomplete="username" autocapitalize="none" spellcheck="false"><span class="form-hint">3–32 символа: латинские буквы, цифры, точка, дефис или подчёркивание</span></label>${recover?'<label class="field">Личный или одноразовый код восстановления<input name="recovery_code" required maxlength="120" autocomplete="off" spellcheck="false"><span class="form-hint">Нет кода? Свяжитесь с организатором для проверки личности</span></label>':''}<label class="field">${mode==='login'?'Пароль':'Новый пароль — минимум 12 символов'}<input name="password" type="password" required ${mode==='login'?'':'minlength="12"'} autocomplete="${mode==='login'?'current-password':'new-password'}"></label>${registration?'<p class="form-hint">После регистрации сохраните личный код восстановления — почта не потребуется</p>':''}<button class="button primary">${registration?'Создать аккаунт':recover?'Сменить пароль':'Войти'}</button>`;
+ form('#login-form',async data=>{
+  const result=await api(mode,data);
+  if(registration)showRecovery(result.recovery_code,()=>refresh());
+  else if(recover)showRecovery(result.recovery_code,async()=>{showLogin();toast('Пароль восстановлен — войдите с новым паролем');});
+  else await refresh();
+ });
+}
+function showRecovery(code,after,temporary=false){
+ recoveryPending=true;
+ modal(temporary?'Одноразовый код для студента':'Сохраните личный код восстановления',`<p>${temporary?'Передайте код только этому студенту после проверки личности — действует 15 минут':'Код позволяет сменить пароль без почты — сохраните его в менеджере паролей, он показывается один раз'}</p><label class="field">${temporary?'Одноразовый код':'Личный код'}<textarea id="recovery-value" readonly spellcheck="false" autocomplete="off">${esc(code)}</textarea></label><button class="button outline" type="button" id="copy-recovery">Скопировать код</button><form id="ack-recovery"><label class="choice"><input name="saved" type="checkbox" required>${temporary?'Я сохранил код для передачи студенту':'Я сохранил код в надёжном месте'}</label><br><button class="button primary">Продолжить</button></form>`);
+ $('#close-modal').disabled=true;
+ $('#copy-recovery').onclick=async()=>{try{await navigator.clipboard.writeText(code);toast('Код скопирован — сохраните его в менеджере паролей');}catch{$('#recovery-value').focus();$('#recovery-value').select();toast('Нажмите Ctrl+C, чтобы скопировать выделенный код');}};
+ form('#ack-recovery',async()=>{recoveryPending=false;$('#close-modal').disabled=false;closeModal();$('#modal-content').replaceChildren();await after();});
+}
+async function resetStudent(id){
+ const s=state.students.find(s=>String(s.id)===String(id));if(!s)return;
+ modal('Восстановить доступ студенту',`<p><b>${esc(s.name)}</b> · логин ${esc(s.login)}</p><p class="form-hint">Сначала лично убедитесь, что запрос пришёл от этого студента — код группы не подтверждает личность</p><form id="admin-reset-form"><label class="choice"><input type="checkbox" name="verified" required>Личность студента проверена</label><label class="field">Ваш пароль организатора<input name="current_password" type="password" required autocomplete="current-password"></label><button class="button primary">Выдать одноразовый код</button></form>`);
+ form('#admin-reset-form',async data=>{const result=await api('admin_reset',{...data,student:id});showRecovery(result.reset_code,()=>refresh(),true);});
+}
+document.addEventListener('click',e=>{const b=e.target.closest('[data-auth],[data-admin-reset]');if(!b)return;if(b.dataset.auth)renderLogin(b.dataset.auth);if(b.dataset.adminReset)resetStudent(b.dataset.adminReset);});
+(async()=>{showLogin();try{const s=await api('session');if(s.user)await refresh();}catch(err){$('#login-status').textContent=err.message;}})();
 window.addEventListener('hashchange',()=>$$('nav a').forEach(a=>a.classList.toggle('active',a.getAttribute('href')===(location.hash||'#courses'))));
 
 function xml(v){return String(v??'').replace(/[<>&"']/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&apos;'}[c]));}
@@ -96,12 +127,12 @@ function zip(files){const chunks=[],central=[];let offset=0,cdsize=0;const enc=n
 }
 $('#export-button').onclick=()=>{
  if(!isAdmin())return;
- const attendance=[['Студент','Почта','Курс','Занятие','Дата (Екатеринбург)','Посещение']],homework=[['Студент','Курс','Занятие','Статус']],summary=[['Студент','Курс','Очно','Онлайн','Пропуски','ДЗ выполнено']];
+ const attendance=[['Студент','Логин','Курс','Занятие','Дата (Екатеринбург)','Посещение']],homework=[['Студент','Курс','Занятие','Статус']],summary=[['Студент','Курс','Очно','Онлайн','Пропуски','ДЗ выполнено']];
  for(const c of state.courses)for(const s of state.students.filter(s=>s.course_id===c.id)){
   let off=0,on=0,miss=0,done=0;
   for(const l of lessons(c.id)){
    const a=state.all_attendance.find(a=>String(a.user_id)===String(s.id)&&a.lesson_id===l.id),h=state.all_homework.find(h=>String(h.user_id)===String(s.id)&&h.lesson_id===l.id);
-   attendance.push([s.name,s.email,c.title,l.title,fmt(l.start,{day:'numeric',month:'long',year:'numeric',hour:'2-digit',minute:'2-digit'}),l.cancelled?'Отменено':a?(a.format==='online'?'Онлайн':'Очно'):l.end>now()?'Ещё не состоялось':'Отсутствовал']);
+   attendance.push([s.name,s.login,c.title,l.title,fmt(l.start,{day:'numeric',month:'long',year:'numeric',hour:'2-digit',minute:'2-digit'}),l.cancelled?'Отменено':a?(a.format==='online'?'Онлайн':'Очно'):l.end>now()?'Ещё не состоялось':'Отсутствовал']);
    homework.push([s.name,c.title,l.title,!l.homework?'Не задано':h?(Number(h.done)?'Выполнено':'Ожидает проверки'):now()>=c.end?'Срок сдачи истёк':'Не отправлено']);
    if(!l.cancelled){if(a?.format==='online')on++;else if(a?.format==='offline')off++;else if(l.end<=now())miss++;if(Number(h?.done))done++;}
   }summary.push([s.name,c.title,off,on,miss,done]);
