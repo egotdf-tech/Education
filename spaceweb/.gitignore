@@ -1,0 +1,6 @@
+bridge-config.php
+bridge-app/storage/
+public_html/uploads/*
+!public_html/uploads/.htaccess
+*.log
+*.jsonl

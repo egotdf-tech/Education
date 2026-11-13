@@ -1,0 +1,10 @@
+Options -Indexes
+DirectoryIndex index.html
+RewriteEngine On
+RewriteCond %{HTTP_HOST} ^study\.brigecorp\.ru$ [NC]
+RewriteCond %{HTTPS} !=on
+RewriteCond %{HTTP:X-Forwarded-Proto} !^https$ [NC]
+RewriteRule ^ https://study.brigecorp.ru%{REQUEST_URI} [R=302,L]
+<FilesMatch "\.(sql|log|ini|env|bak)$">
+ Require all denied
+</FilesMatch>
