@@ -8,6 +8,7 @@ $message='';$ready=false;$recovery='';
 try {
  require dirname(__DIR__).'/bridge-app/bootstrap.php';
  require dirname(__DIR__).'/bridge-app/auth.php';
+ require dirname(__DIR__).'/bridge-app/rewards.php';
  $c=config();
  if(($c['environment']??'production')!=='test'&&empty($_SERVER['HTTPS'])&&($_SERVER['HTTP_X_FORWARDED_PROTO']??'')!=='https')throw new RuntimeException('Open HTTPS');
  $lockPath=dirname(__DIR__).'/bridge-app/storage/password-install.lock';
@@ -29,6 +30,7 @@ try {
    q('INSERT INTO bridge_credentials(user_id,login,password_hash,recovery_hash) VALUES(?,?,?,?)',[$id,$login,password_hash($password,PASSWORD_DEFAULT),recovery_hash($recovery)]);
    q('UPDATE bridge_users SET name=? WHERE id=?',[$name,$id]);
   });
+  upgrade_rewards();
   $dir=dirname(__DIR__).'/bridge-app/storage';if(!is_dir($dir)&&!mkdir($dir,0700,true))throw new RuntimeException('Storage');
   if(file_put_contents($lockPath,date('c'),LOCK_EX)===false)throw new RuntimeException('Install lock');
   $ready=true;$message='Кабинет организатора создан — сохраните код восстановления, затем удалите install.php и войдите на сайт';

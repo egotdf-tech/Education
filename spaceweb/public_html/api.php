@@ -8,6 +8,8 @@ header('X-Frame-Options: DENY');
 try {
  require dirname(__DIR__).'/bridge-app/bootstrap.php';
  require dirname(__DIR__).'/bridge-app/auth.php';
+ require dirname(__DIR__).'/bridge-app/attendance.php';
+ require dirname(__DIR__).'/bridge-app/rewards.php';
  $config=config();
  if(($config['environment']??'production')!=='test'&&empty($_SERVER['HTTPS'])&&($_SERVER['HTTP_X_FORWARDED_PROTO']??'')!=='https')fail('Откройте сайт через HTTPS',400);
  session_boot();
@@ -31,12 +33,24 @@ try {
   $homework=[];foreach(rows('SELECT * FROM bridge_homework WHERE user_id=?',[$u['id']])as $h)$homework[$h['lesson_id']]=['text'=>$h['body'],'done'=>(bool)$h['done'],'comment'=>$h['comment']];
   $feedback=$u['role']==='admin'?rows('SELECT f.*,u.name FROM bridge_feedback f JOIN bridge_users u ON u.id=f.user_id ORDER BY f.created_at DESC'):rows("SELECT f.*,u.name FROM bridge_feedback f JOIN bridge_users u ON u.id=f.user_id JOIN bridge_lessons l ON l.id=f.lesson_id JOIN bridge_memberships m ON m.course_id=l.course_id WHERE m.user_id=? AND (f.user_id=? OR f.visibility='public') ORDER BY f.created_at DESC",[$u['id'],$u['id']]);
   foreach($feedback as &$f){$f['replies']=rows('SELECT r.id,r.body AS text,r.user_id,u.name,u.role,r.created_at FROM bridge_replies r JOIN bridge_users u ON u.id=r.user_id WHERE r.feedback_id=? ORDER BY r.id',[$f['id']]);}unset($f);
-  $awards=awards($u['id'],$courses,$ls,$attendance,$homework,$feedback);
+  $ready=rewards_ready();
+  if($ready){
+   if($u['role']==='admin')sync_all_rewards();else sync_user_rewards($u['id']);
+   $awards=rows('SELECT award_key AS `key`,name,image,label,course_id,awarded_at,catalog_id FROM bridge_award_ledger WHERE user_id=? AND active=1 ORDER BY awarded_at,id',[$u['id']]);
+   foreach($awards as &$aw){$aw['creature']=preg_match('/^builtin-([0-4])$/',$aw['catalog_id'],$m)?(int)$m[1]:0;}unset($aw);
+  }else{$awards=awards($u['id'],$courses,$ls,$attendance,$homework,$feedback);}
   $normalizedCourses=array_map(function($c)use($u){$v=['id'=>$c['id'],'title'=>$c['title'],'description'=>$c['description'],'end'=>(int)$c['end_at'],'image'=>$c['image']];if($u['role']==='admin')$v['code']=$c['code'];return $v;},$courses);
-  $data=['profile'=>$u,'csrf'=>$_SESSION['csrf'],'courses'=>$normalizedCourses,'lessons'=>array_map('normalized_lesson',$ls),'attendance'=>$attendance,'homework'=>$homework,'feedback'=>$feedback,'awards'=>$awards,'notifications'=>rows('SELECT id,lesson_id,body,is_read FROM bridge_notifications WHERE user_id=? ORDER BY id DESC LIMIT 100',[$u['id']]),'server_time'=>clock_ms()];
+  $data=['profile'=>$u,'csrf'=>$_SESSION['csrf'],'courses'=>$normalizedCourses,'lessons'=>array_map('normalized_lesson',$ls),'attendance'=>$attendance,'homework'=>$homework,'feedback'=>$feedback,'awards'=>$awards,'notifications'=>rows('SELECT id,lesson_id,body,is_read FROM bridge_notifications WHERE user_id=? ORDER BY id DESC LIMIT 100',[$u['id']]),'server_time'=>clock_ms(),'rewards_ready'=>$ready];
   if($u['role']==='admin'){
    $data['students']=rows('SELECT u.id,u.name,c.login,m.course_id FROM bridge_memberships m JOIN bridge_users u ON u.id=m.user_id LEFT JOIN bridge_credentials c ON c.user_id=u.id ORDER BY u.name');
    $data['all_attendance']=rows('SELECT * FROM bridge_attendance');$data['all_homework']=rows('SELECT * FROM bridge_homework');
+   $data['attendance_metrics']=attendance_metrics($courses,$ls,$data['students'],$data['all_attendance'],clock_ms());
+   if($ready){
+    $data['reward_catalog']=rows('SELECT * FROM bridge_reward_catalog ORDER BY created_at,id');
+    $data['reward_rules']=rows('SELECT * FROM bridge_reward_rules ORDER BY kind');
+    $data['reward_pool']=array_column(rows('SELECT catalog_id FROM bridge_reward_pool'),'catalog_id');
+    $data['student_awards']=rows('SELECT a.*,u.name AS student_name,c.title AS course_title FROM bridge_award_ledger a JOIN bridge_users u ON u.id=a.user_id JOIN bridge_courses c ON c.id=a.course_id ORDER BY a.awarded_at DESC,a.id DESC');
+   }
    $data['outbox_pending']=(int)q('SELECT COUNT(*) FROM bridge_outbox WHERE sent_at IS NULL')->fetchColumn();
   }respond($data);
  }
@@ -64,7 +78,11 @@ try {
    q('SELECT id FROM bridge_users WHERE id=? FOR UPDATE',[$u['id']]);
    $f=one('SELECT id FROM bridge_feedback WHERE user_id=? AND lesson_id=? FOR UPDATE',[$u['id'],$l['id']]);
    if($f)q('UPDATE bridge_feedback SET takeaway=?,impression=?,question=?,liked=?,wishes=?,visibility=? WHERE id=?',[...$values,$visibility,$f['id']]);
-   else{q('INSERT INTO bridge_feedback(id,user_id,lesson_id,takeaway,impression,question,liked,wishes,visibility,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',[uid(),$u['id'],$l['id'],...$values,$visibility,clock_ms()]);q('INSERT IGNORE INTO bridge_rewards(user_id,lesson_id,creature) VALUES(?,?,?)',[$u['id'],$l['id'],random_int(0,4)]);}
+   else{
+    q('INSERT INTO bridge_feedback(id,user_id,lesson_id,takeaway,impression,question,liked,wishes,visibility,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',[uid(),$u['id'],$l['id'],...$values,$visibility,clock_ms()]);
+    if(rewards_ready())grant_review($u['id'],$l['id']);
+    q('INSERT IGNORE INTO bridge_rewards(user_id,lesson_id,creature) VALUES(?,?,?)',[$u['id'],$l['id'],random_int(0,4)]);
+   }
    queue_telegram('Новый или обновлённый отзыв · '.$u['name'].' · '.$l['title'].' · '.($visibility==='public'?'для группы':'личный')."\n".config()['base_url']);
   });respond(['ok'=>true]);
  }
@@ -97,6 +115,35 @@ try {
  }
  // All remaining operations are explicitly administrator-only.
  admin();
+ if($action==='upgrade_features'){
+  rate('upgrade-features:'.$u['id'],5,900);
+  $password=$input['current_password']??'';$credentials=one('SELECT password_hash FROM bridge_credentials WHERE user_id=?',[$u['id']]);
+  if(($input['backup_confirmed']??false)!==true||!is_string($password)||strlen($password)>72||!password_verify($password,$credentials['password_hash']))fail('Подтвердите резервную копию и пароль организатора');
+  upgrade_rewards();respond(['ok'=>true]);
+ }
+ if(in_array($action,['reward_asset_save','reward_rules_save'],true)){
+  if(!rewards_ready())fail('Сначала примените обновление наград',409);
+  if($action==='reward_asset_save'){
+   $id=field($input,'id',40)?:uid();$name=field($input,'name',120,true);$old=one('SELECT * FROM bridge_reward_catalog WHERE id=?',[$id]);
+   $enabled=($input['enabled']??true)?1:0;
+   if(!$enabled&&(one('SELECT kind FROM bridge_reward_rules WHERE catalog_id=?',[$id])||one('SELECT catalog_id FROM bridge_reward_pool WHERE catalog_id=?',[$id])))fail('Сначала уберите персонажа из правил и набора за отзыв');
+   $image=!empty($input['image_data'])?reward_asset_image($input):($old['image']??'');
+   if($image==='')fail('Загрузите картинку нового персонажа');
+   sync_all_rewards();
+   q('INSERT INTO bridge_reward_catalog(id,name,image,enabled,created_at) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE name=VALUES(name),image=VALUES(image),enabled=VALUES(enabled)',[$id,$name,$image,$enabled,clock_ms()]);respond(['id'=>$id]);
+  }
+  $pool=$input['pool']??null;$rules=$input['rules']??null;
+  if(!is_array($pool)||!$pool||count($pool)>100||!is_array($rules))fail('Выберите хотя бы одного персонажа за отзыв и все достижения');
+  $ids=[];foreach($pool as $id){if(!is_string($id)||strlen($id)>40)fail('Некорректный персонаж');$ids[]=$id;}
+  foreach(BRIDGE_REWARD_RULES as $kind=>$unused){if(!isset($rules[$kind])||!is_string($rules[$kind]))fail('Настройте каждое достижение');$ids[]=$rules[$kind];}
+  foreach(array_unique($ids)as $id)if(!one('SELECT id FROM bridge_reward_catalog WHERE id=? AND enabled=1',[$id]))fail('Персонаж недоступен');
+  // Capture all eligible awards with the OLD rules before changing future rewards.
+  sync_all_rewards();
+  transaction(function()use($pool,$rules){
+   q('DELETE FROM bridge_reward_pool');foreach(array_unique($pool)as $id)q('INSERT INTO bridge_reward_pool(catalog_id) VALUES(?)',[$id]);
+   foreach(BRIDGE_REWARD_RULES as $kind=>$unused)q('UPDATE bridge_reward_rules SET catalog_id=? WHERE kind=?',[$rules[$kind],$kind]);
+  });respond(['ok'=>true]);
+ }
  if($action==='admin_reset'){
   rate('admin-reset:'.$u['id'],15,900);
   $sid=(int)($input['student']??0);$current=$input['current_password']??'';

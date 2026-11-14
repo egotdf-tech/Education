@@ -1,7 +1,7 @@
 'use strict';
 const $=(s,r=document)=>r.querySelector(s),$$=(s,r=document)=>[...r.querySelectorAll(s)];
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let state=null,csrf='',activeCourse='',offset=0,toastTimer,recoveryPending=false;
+let state=null,csrf='',activeCourse='',scheduleCourse='all',schedulePeriod='upcoming',offset=0,toastTimer,recoveryPending=false;
 const creatures=[['Глаз да практика','hero'],['Тихий наблюдатель','observer'],['Рыба вне шаблона','fish'],['Не открывать до озарения','bottle'],['Совет неочевидных','owl']];
 const now=()=>Date.now()+offset;
 const fmt=(t,o={})=>new Intl.DateTimeFormat('ru-RU',{timeZone:'Asia/Yekaterinburg',...o}).format(Number(t));
@@ -58,14 +58,34 @@ function render(){
   const custom=/^(?:[a-f0-9]{20}|[a-f0-9]{32})\.(png|jpg|webp)$/.test(c.image);
   return `<article class="course-card"><div class="course-visual ${i%2?'sand':''} ${custom?'has-custom-image':''}"><span class="course-tag">${isAdmin()?'ВЫ ОРГАНИЗАТОР':'ВАШ КУРС'} · БРИДЖ</span><div class="course-number">${String(i+1).padStart(2,'0')}</div><img src="${image(c)}" alt="Картинка курса ${esc(c.title)}"></div><div class="course-body"><h3>${esc(c.title)}</h3><p>${esc(c.description)}</p>${isAdmin()?`<div class="course-summary"><span>${ls.length} занятий</span><span>${participants} участников</span></div><button class="text-button" data-edit-course="${c.id}">Изменить курс и картинку</button>`:`<div class="progress-line"><span style="width:${ls.length?n/ls.length*100:0}%"></span></div><div class="progress-caption"><span>Ваше участие</span><span>${n} из ${ls.length} занятий</span></div>`}<div class="course-footer"><span>${next?'Ближайшее: '+date(next.start):'До '+date(c.end)}</span><button data-course="${esc(c.id)}">К занятиям →</button></div></div></article>`;
  }).join('')||`<div class="empty">${isAdmin()?'Создайте первый курс кнопкой выше':'Добавьте курс по коду, который выдал организатор'}</div>`;
- $('#course-filter').innerHTML=state.courses.map(c=>`<option value="${esc(c.id)}">${esc(c.title)}</option>`).join('');$('#course-filter').value=activeCourse;
- schedule();collection();notifications();if(isAdmin())adminPanel();
+ if(scheduleCourse!=='all'&&!course(scheduleCourse))scheduleCourse='all';
+ $('#course-filter').innerHTML='<option value="all">Все курсы</option>'+state.courses.map(c=>`<option value="${esc(c.id)}">${esc(c.title)}</option>`).join('');$('#course-filter').value=scheduleCourse;$('#schedule-period').value=schedulePeriod;
+ schedule();collection();notifications();if(isAdmin())adminPanel();if(typeof renderManagement==='function')renderManagement();
 }
-function schedule(){ $('#lesson-list').innerHTML=lessons(activeCourse).map(l=>{const a=state.attendance[l.id],live=!l.cancelled&&now()>=l.start&&now()<l.end;return `<button class="lesson-row" data-lesson="${esc(l.id)}"><span class="date-box"><strong>${fmt(l.start,{day:'2-digit'})}</strong><span>${fmt(l.start,{month:'short'})}</span></span><span><span class="lesson-title">${esc(l.title)}</span><span class="lesson-meta">${time(l.start)}–${time(l.end)} · ${esc(l.teacher)}</span></span><span class="lesson-state">${l.cancelled?'Отменено':a?(a==='online'?'✓ Онлайн':'✓ Очно'):live?'Идёт сейчас':l.end<=now()?'Завершено':'Скоро'} →</span></button>`;}).join('')||'<div class="empty">Занятия появятся здесь после заполнения расписания</div>';}
+function schedule(){
+ const ls=state.lessons.filter(l=>(scheduleCourse==='all'||l.course===scheduleCourse)&&(schedulePeriod==='all'||(schedulePeriod==='upcoming'?l.end>now():l.end<=now()))).sort((a,b)=>a.start-b.start||a.title.localeCompare(b.title,'ru'));
+ let lastDay='';
+ $('#lesson-list').innerHTML=ls.map(l=>{
+  const a=state.attendance[l.id],live=!l.cancelled&&now()>=l.start&&now()<l.end;
+  const day=fmt(l.start,{day:'numeric',month:'long',year:'numeric'});
+  const heading=lastDay===day?'':`<h3 class="schedule-day">${esc(day)}</h3>`;lastDay=day;
+  const totals=isAdmin()?state.attendance_metrics?.[l.course]?.lessons?.[l.id]:null;
+  return heading+`<button class="lesson-row" data-lesson="${esc(l.id)}"><span class="date-box"><strong>${fmt(l.start,{day:'2-digit'})}</strong><span>${fmt(l.start,{month:'short'})}</span></span><span><span class="lesson-title">${esc(l.title)}</span><span class="lesson-course">${esc(course(l.course)?.title||'')}</span><span class="lesson-meta">${time(l.start)}–${time(l.end)} · ${esc(l.teacher)}${totals&&!l.cancelled?' · Отмечено: '+totals.present+' (онлайн '+totals.online+', очно '+totals.offline+')':''}</span></span><span class="lesson-state">${l.cancelled?'Отменено':!isAdmin()&&a?(a==='online'?'✓ Онлайн':'✓ Очно'):live?'Идёт сейчас':l.end<=now()?'Завершено':'Скоро'} →</span></button>`;
+ }).join('')||'<div class="empty">Нет занятий для выбранного курса и периода</div>';
+}
+function goToSchedule(id){
+ scheduleCourse=id;schedulePeriod='all';activeCourse=id;
+ $('#course-filter').value=id;$('#schedule-period').value='all';schedule();if(isAdmin())adminPanel();
+ history.replaceState(null,'','#schedule');window.dispatchEvent(new Event('hashchange'));
+ const target=$('#schedule');target.scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'});
+ const title=$('h2',target);title.tabIndex=-1;title.focus({preventScroll:true});
+ target.classList.remove('schedule-highlight');void target.offsetWidth;target.classList.add('schedule-highlight');
+ setTimeout(()=>target.classList.remove('schedule-highlight'),2200);
+}
 function collection(){
  $('#collection-count').textContent=state.awards.length+' открыто';
  const list=state.awards.length?state.awards:[0,1,2,3].map(creature=>({creature,locked:true,label:'Ваш следующий спутник'}));
- $('#reward-grid').innerHTML=list.map(a=>{const cr=creatures[a.creature];return `<div class="reward-card ${a.locked?'locked':''}"><img src="assets/${cr[1]}.webp" alt="${a.locked?'Закрытый персонаж':esc(cr[0])}"><strong>${a.locked?'? Кто-то необычный':esc(cr[0])}</strong><small>${esc(a.label)}</small></div>`;}).join('');
+ $('#reward-grid').innerHTML=list.map(a=>{const cr=creatures[a.creature??0];return `<div class="reward-card ${a.locked?'locked':''}"><img src="${a.image?image(a):'assets/'+cr[1]+'.webp'}" alt="${a.locked?'Закрытый персонаж':esc(a.name||cr[0])}"><strong>${a.locked?'? Кто-то необычный':esc(a.name||cr[0])}</strong><small>${esc(a.label)}</small></div>`;}).join('');
 }
 function notifications(){const n=state.notifications;$('#unread-count').textContent=n.filter(x=>!Number(x.is_read)).length;$('#notification-list').innerHTML=n.map(x=>`<div class="notification ${Number(x.is_read)?'':'unread'}">${esc(x.body)} <button class="text-button" data-notification="${esc(x.lesson_id)}">Открыть →</button></div>`).join('')||'<div class="empty">Здесь появятся ответы организатора и результаты проверки заданий</div>';}
 function feedbackBody(f){return [['takeaway','Что беру в работу'],['impression','Впечатление'],['question','Вопрос'],['liked','Что понравилось'],['wishes','Чего не хватило']].filter(([k])=>f[k]).map(([k,t])=>`<p class="review-body"><b>${t}</b><br>${esc(f[k])}</p>`).join('');}
@@ -92,7 +112,7 @@ function openOrganizerLesson(l){
 function adminPanel(){
  $('#admin-courses').innerHTML=state.courses.map(c=>`<div class="admin-course-line"><div><b>${esc(c.title)}</b><small>Код группы: ${esc(c.code)} · до ${date(c.end)}</small></div><button class="text-button" data-edit-course="${esc(c.id)}">Изменить курс</button></div>`).join('');
  const group=(state.students||[]).filter(s=>s.course_id===activeCourse),ls=lessons(activeCourse),allA=state.all_attendance,allH=state.all_homework;
- $('#admin-table').innerHTML=group.flatMap(s=>ls.map(l=>{const a=allA.find(x=>String(x.user_id)===String(s.id)&&x.lesson_id===l.id),h=allH.find(x=>String(x.user_id)===String(s.id)&&x.lesson_id===l.id);return `<tr><td>${esc(s.name)}<small>${esc(s.login||'Логин не назначен')}</small>${s.login?`<button class="text-button" data-admin-reset="${s.id}">Восстановить доступ</button>`:''}<small>${esc(l.title)} · ${date(l.start)}</small></td><td><select data-attendance="${l.id}" data-student="${s.id}" aria-label="Посещение ${esc(s.name)}"><option value="">${l.cancelled?'Отменено':now()<l.end?'Ещё не состоялось':'Отсутствовал'}</option><option value="offline" ${a?.format==='offline'?'selected':''}>Очно</option><option value="online" ${a?.format==='online'?'selected':''}>Онлайн</option></select></td><td>${!l.homework?'Не задано':h?(Number(h.done)?'✓ Выполнено':'Ожидает проверки'):now()>=course(l.course).end?'Срок сдачи истёк':'Не отправлено'}</td><td>${h?`<button class="text-button" data-check="${l.id}" data-student="${s.id}">Проверить ДЗ</button>`:''}</td></tr>`;})).join('')||'<tr><td colspan="4">Участники появятся после присоединения по коду</td></tr>';
+ $('#admin-table').innerHTML='';$('#organizer .table-wrap').hidden=true;
  $('#admin-feedback').innerHTML='<h3>Занятия курса</h3>'+ls.map(l=>`<div class="admin-course-line"><span>${esc(l.title)}</span><span><button class="text-button" data-edit-lesson="${l.id}">Изменить</button><button class="text-button" data-copy-lesson="${l.id}">Копия</button></span></div>`).join('')+'<h3>Обратная связь</h3>'+state.feedback.filter(f=>ls.some(l=>l.id===f.lesson_id)).map(f=>`<article class="admin-review"><div class="eyebrow">${f.visibility==='public'?'ПУБЛИЧНЫЙ ОТЗЫВ':'ЛИЧНЫЙ ОТЗЫВ'}</div><h4>${esc(f.name)} · ${esc(state.lessons.find(l=>l.id===f.lesson_id)?.title)}</h4>${feedbackBody(f)}${conversation(f)}</article>`).join('');
  $('.telegram-note').textContent='Уведомления Telegram: '+state.outbox_pending+' в очереди · для доставки нужен настроенный обработчик на хостинге';
 }
@@ -124,10 +144,11 @@ $('#profile-button').onclick=()=>{
 };
 $('#logout-button').onclick=async()=>{try{await api('logout',{});location.reload();}catch(e){toast(e.message);}};
 $('#read-all').onclick=async()=>{try{await api('read_notifications',{});await refresh();}catch(e){toast(e.message);}};
-$('#course-filter').onchange=e=>{activeCourse=e.target.value;schedule();if(isAdmin())adminPanel();};
+$('#course-filter').onchange=e=>{scheduleCourse=e.target.value;if(scheduleCourse!=='all'){activeCourse=scheduleCourse;if(isAdmin())adminPanel();}schedule();};
+$('#schedule-period').onchange=e=>{schedulePeriod=e.target.value;schedule();};
 $('#new-course').onclick=()=>editCourse();$('#new-lesson').onclick=()=>editLesson();
 $('#nearest-lesson').onclick=e=>{e.preventDefault();if(isAdmin()){location.hash='organizer';return;}const ls=state.lessons.filter(l=>!l.cancelled).sort((a,b)=>a.start-b.start);const l=ls.find(l=>l.end>now())||ls.at(-1);if(l)openLesson(l.id);else toast('Пока нет занятий');};
-document.addEventListener('click',async e=>{const b=e.target.closest('[data-course],[data-lesson],[data-edit-course],[data-edit-lesson],[data-copy-lesson],[data-check],[data-notification]');if(!b)return;try{if(b.dataset.course){activeCourse=b.dataset.course;$('#course-filter').value=activeCourse;schedule();if(isAdmin())adminPanel();location.hash='schedule';}if(b.dataset.lesson)openLesson(b.dataset.lesson);if(b.dataset.editCourse)editCourse(b.dataset.editCourse);if(b.dataset.editLesson)editLesson(b.dataset.editLesson);if(b.dataset.copyLesson)editLesson(b.dataset.copyLesson,true);if(b.dataset.check)checkHomework(b.dataset.student,b.dataset.check);if(b.dataset.notification){await api('read_notifications',{});await refresh();openLesson(b.dataset.notification);}}catch(err){toast(err.message);}});
+document.addEventListener('click',async e=>{const b=e.target.closest('[data-course],[data-lesson],[data-edit-course],[data-edit-lesson],[data-copy-lesson],[data-check],[data-notification]');if(!b)return;try{if(b.dataset.course)goToSchedule(b.dataset.course);if(b.dataset.lesson)openLesson(b.dataset.lesson);if(b.dataset.editCourse)editCourse(b.dataset.editCourse);if(b.dataset.editLesson)editLesson(b.dataset.editLesson);if(b.dataset.copyLesson)editLesson(b.dataset.copyLesson,true);if(b.dataset.check)checkHomework(b.dataset.student,b.dataset.check);if(b.dataset.notification){await api('read_notifications',{});await refresh();openLesson(b.dataset.notification);}}catch(err){toast(err.message);}});
 document.addEventListener('change',async e=>{if(!e.target.dataset.attendance)return;try{await api('admin_attendance',{lesson:e.target.dataset.attendance,student:e.target.dataset.student,format:e.target.value});await refresh();toast('Посещение исправлено');}catch(err){toast(err.message);await refresh();}});
 document.addEventListener('submit',async e=>{const id=e.target.dataset.reply;if(!id)return;e.preventDefault();const el=e.target,text=$('input',el).value.trim();if(!text)return;const b=$('button',el);b.disabled=true;try{const l=state.feedback.find(f=>f.id===id)?.lesson_id;await api('reply',{feedback:id,text});await refresh();if($('#modal').open&&l)openLesson(l);toast('Сообщение сохранено');}catch(err){toast(err.message);}finally{b.disabled=false;}});
 function renderLogin(mode='login'){
@@ -167,7 +188,7 @@ function zip(files){const chunks=[],central=[];let offset=0,cdsize=0;const enc=n
 }
 $('#export-button').onclick=()=>{
  if(!isAdmin())return;
- const attendance=[['Студент','Логин','Курс','Занятие','Дата (Екатеринбург)','Посещение']],homework=[['Студент','Курс','Занятие','Статус']],summary=[['Студент','Курс','Очно','Онлайн','Пропуски','ДЗ выполнено']];
+ const attendance=[['Студент','Логин','Курс','Занятие','Дата (Екатеринбург)','Посещение']],homework=[['Студент','Курс','Занятие','Статус']],summary=[['Студент','Курс','Очно (завершённые)','Онлайн (завершённые)','Пропуски','ДЗ выполнено','Состоялось занятий','Посещаемость, %']];
  for(const c of state.courses)for(const s of state.students.filter(s=>s.course_id===c.id)){
   let off=0,on=0,miss=0,done=0;
   for(const l of lessons(c.id)){
@@ -175,14 +196,15 @@ $('#export-button').onclick=()=>{
    attendance.push([s.name,s.login,c.title,l.title,fmt(l.start,{day:'numeric',month:'long',year:'numeric',hour:'2-digit',minute:'2-digit'}),l.cancelled?'Отменено':a?(a.format==='online'?'Онлайн':'Очно'):l.end>now()?'Ещё не состоялось':'Отсутствовал']);
    homework.push([s.name,c.title,l.title,!l.homework?'Не задано':h?(Number(h.done)?'Выполнено':'Ожидает проверки'):now()>=c.end?'Срок сдачи истёк':'Не отправлено']);
    if(!l.cancelled){if(a?.format==='online')on++;else if(a?.format==='offline')off++;else if(l.end<=now())miss++;if(Number(h?.done))done++;}
-  }summary.push([s.name,c.title,off,on,miss,done]);
+  }const m=state.attendance_metrics?.[c.id]?.students?.[String(s.id)];summary.push([s.name,c.title,m?.offline??off,m?.online??on,m?.absent??miss,done,m?.completed??'',m?.percent??'—']);
  }
- const files={'[Content_Types].xml':'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'+[1,2,3].map(i=>`<Override PartName="/xl/worksheets/sheet${i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')+'</Types>',
+ const lessonTotals=[['Курс','Занятие','Дата (Екатеринбург)','Студентов в группе','Присутствовали','Онлайн','Очно','Отсутствовали','Статус']];for(const c of state.courses)for(const l of lessons(c.id)){const m=state.attendance_metrics?.[c.id],t=m?.lessons?.[l.id];lessonTotals.push([c.title,l.title,fmt(l.start,{day:'numeric',month:'long',year:'numeric',hour:'2-digit',minute:'2-digit'}),m?.enrolled??'',t?.present??'',t?.online??'',t?.offline??'',t?.absent??'—',l.cancelled?'Отменено':l.end<=now()?'Завершено':'Предстоит']);}
+ const files={'[Content_Types].xml':'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'+[1,2,3,4].map(i=>`<Override PartName="/xl/worksheets/sheet${i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')+'</Types>',
  '_rels/.rels':'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
- 'xl/workbook.xml':'<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'+['Посещаемость','Домашние задания','Сводка'].map((s,i)=>`<sheet name="${s}" sheetId="${i+1}" r:id="rId${i+1}"/>`).join('')+'</sheets></workbook>',
- 'xl/_rels/workbook.xml.rels':'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'+[1,2,3].map(i=>`<Relationship Id="rId${i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i}.xml"/>`).join('')+'</Relationships>',
- 'xl/worksheets/sheet1.xml':sheet(attendance),'xl/worksheets/sheet2.xml':sheet(homework),'xl/worksheets/sheet3.xml':sheet(summary)};
+ 'xl/workbook.xml':'<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>'+['Посещаемость','Домашние задания','Сводка','Итоги занятий'].map((s,i)=>`<sheet name="${s}" sheetId="${i+1}" r:id="rId${i+1}"/>`).join('')+'</sheets></workbook>',
+ 'xl/_rels/workbook.xml.rels':'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'+[1,2,3,4].map(i=>`<Relationship Id="rId${i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i}.xml"/>`).join('')+'</Relationships>',
+ 'xl/worksheets/sheet1.xml':sheet(attendance),'xl/worksheets/sheet2.xml':sheet(homework),'xl/worksheets/sheet3.xml':sheet(summary),'xl/worksheets/sheet4.xml':sheet(lessonTotals)};
  const u=URL.createObjectURL(zip(files)),a=document.createElement('a');a.href=u;a.download='БРИДЖ_отчёт.xlsx';a.click();setTimeout(()=>URL.revokeObjectURL(u),10000);
 };
 
-setInterval(()=>{if(state&&document.visibilityState==='visible'&&!$('#modal').open)refresh().catch(e=>toast(e.message));},60000);
+setInterval(()=>{if(state&&document.visibilityState==='visible'&&!$('#modal').open&&(typeof managementDirty==='undefined'||!managementDirty))refresh().catch(e=>toast(e.message));},60000);
