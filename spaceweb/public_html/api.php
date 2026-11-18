@@ -10,6 +10,8 @@ try {
  require dirname(__DIR__).'/bridge-app/auth.php';
  require dirname(__DIR__).'/bridge-app/attendance.php';
  require dirname(__DIR__).'/bridge-app/rewards.php';
+ require dirname(__DIR__).'/bridge-app/feedback.php';
+ require dirname(__DIR__).'/bridge-app/telegram.php';
  $config=config();
  if(($config['environment']??'production')!=='test'&&empty($_SERVER['HTTPS'])&&($_SERVER['HTTP_X_FORWARDED_PROTO']??'')!=='https')fail('Откройте сайт через HTTPS',400);
  session_boot();
@@ -23,6 +25,7 @@ try {
  if($method!=='POST'&&$action!=='state')fail('Неподдерживаемый метод',405);
  auth_action($action,$input);
  $u=user();
+ telegram_action($action,$input);
  if($u['role']==='admin'&&in_array($action,['join','attendance','homework','feedback'],true))fail('Это действие доступно участникам — организатор управляет курсом отдельно',403);
  if($action==='logout'){$_SESSION=[];session_destroy();respond(['ok'=>true]);}
  if($action==='profile'){q('UPDATE bridge_users SET name=? WHERE id=?',[field($input,'name',100,true),$u['id']]);respond(['ok'=>true]);}
@@ -40,7 +43,7 @@ try {
    foreach($awards as &$aw){$aw['creature']=preg_match('/^builtin-([0-4])$/',$aw['catalog_id'],$m)?(int)$m[1]:0;}unset($aw);
   }else{$awards=awards($u['id'],$courses,$ls,$attendance,$homework,$feedback);}
   $normalizedCourses=array_map(function($c)use($u){$v=['id'=>$c['id'],'title'=>$c['title'],'description'=>$c['description'],'end'=>(int)$c['end_at'],'image'=>$c['image']];if($u['role']==='admin')$v['code']=$c['code'];return $v;},$courses);
-  $data=['profile'=>$u,'csrf'=>$_SESSION['csrf'],'courses'=>$normalizedCourses,'lessons'=>array_map('normalized_lesson',$ls),'attendance'=>$attendance,'homework'=>$homework,'feedback'=>$feedback,'awards'=>$awards,'notifications'=>rows('SELECT id,lesson_id,body,is_read FROM bridge_notifications WHERE user_id=? ORDER BY id DESC LIMIT 100',[$u['id']]),'server_time'=>clock_ms(),'rewards_ready'=>$ready];
+  $data=['profile'=>$u,'csrf'=>$_SESSION['csrf'],'courses'=>$normalizedCourses,'lessons'=>array_map('normalized_lesson',$ls),'attendance'=>$attendance,'homework'=>$homework,'feedback'=>$feedback,'awards'=>$awards,'notifications'=>array_map('decode_notice',rows('SELECT id,lesson_id,body,is_read,created_at FROM bridge_notifications WHERE user_id=? ORDER BY id DESC LIMIT 100',[$u['id']])),'unread_count'=>(int)q('SELECT COUNT(*) FROM bridge_notifications WHERE user_id=? AND is_read=0',[$u['id']])->fetchColumn(),'server_time'=>clock_ms(),'rewards_ready'=>$ready];
   if($u['role']==='admin'){
    $data['students']=rows('SELECT u.id,u.name,c.login,m.course_id FROM bridge_memberships m JOIN bridge_users u ON u.id=m.user_id LEFT JOIN bridge_credentials c ON c.user_id=u.id ORDER BY u.name');
    $data['all_attendance']=rows('SELECT * FROM bridge_attendance');$data['all_homework']=rows('SELECT * FROM bridge_homework');
@@ -83,14 +86,16 @@ try {
     if(rewards_ready())grant_review($u['id'],$l['id']);
     q('INSERT IGNORE INTO bridge_rewards(user_id,lesson_id,creature) VALUES(?,?,?)',[$u['id'],$l['id'],random_int(0,4)]);
    }
-   queue_telegram('Новый или обновлённый отзыв · '.$u['name'].' · '.$l['title'].' · '.($visibility==='public'?'для группы':'личный')."\n".config()['base_url']);
+   $fid=$f['id']??one('SELECT id FROM bridge_feedback WHERE user_id=? AND lesson_id=?',[$u['id'],$l['id']])['id'];
+   notify_organizers($l['id'],$fid,($f?'Обновлённый отзыв':'Новый отзыв').' · '.$u['name'].' · '.$l['title']);
+   queue_telegram('Новый или обновлённый отзыв · '.$u['name'].' · '.$l['title'].' · '.($visibility==='public'?'для группы':'личный')."\n".config()['base_url'].'/#review-'.$fid);
   });respond(['ok'=>true]);
  }
  if($action==='reply'){
   $id=field($input,'feedback',40,true);$f=one('SELECT * FROM bridge_feedback WHERE id=?',[$id]);if(!$f)fail('Запись не найдена',404);$l=lesson($f['lesson_id'],$u);
   if($u['role']!=='admin'&&(string)$f['user_id']!==(string)$u['id'])fail('Отвечать могут автор и организатор',403);
   $text=field($input,'text',5000,true);
-  transaction(function()use($id,$u,$text,$f,$l){q('INSERT INTO bridge_replies(feedback_id,user_id,body,created_at) VALUES(?,?,?,?)',[$id,$u['id'],$text,clock_ms()]);if($u['role']==='admin')add_notification($f['user_id'],$l['id'],'Организатор ответил на ваш отзыв: '.$l['title']);else queue_telegram('Новое сообщение · '.$u['name'].' · '.$l['title']."\n".config()['base_url']);});respond(['ok'=>true]);
+  transaction(function()use($id,$u,$text,$f,$l){q('INSERT INTO bridge_replies(feedback_id,user_id,body,created_at) VALUES(?,?,?,?)',[$id,$u['id'],$text,clock_ms()]);if($u['role']==='admin')add_notification($f['user_id'],$l['id'],'Организатор ответил на ваш отзыв: '.$l['title']);else{notify_organizers($l['id'],$id,'Сообщение от студента · '.$u['name'].' · '.$l['title']);queue_telegram('Новое сообщение · '.$u['name'].' · '.$l['title']."\n".config()['base_url'].'/#review-'.$id);}});respond(['ok'=>true]);
  }
  if($action==='change_password'){
   rate('password-change:'.$u['id'],10,900);
@@ -115,6 +120,8 @@ try {
  }
  // All remaining operations are explicitly administrator-only.
  admin();
+ if($action==='backfill_feedback_notices'){respond(['added'=>backfill_feedback_notices($u['id'])]);}
+ if($action==='read_feedback_notices'){read_feedback_notices($u['id'],field($input,'feedback',40,true));respond(['ok'=>true,'unread_count'=>(int)q('SELECT COUNT(*) FROM bridge_notifications WHERE user_id=? AND is_read=0',[$u['id']])->fetchColumn()]);}
  if($action==='upgrade_features'){
   rate('upgrade-features:'.$u['id'],5,900);
   $password=$input['current_password']??'';$credentials=one('SELECT password_hash FROM bridge_credentials WHERE user_id=?',[$u['id']]);

@@ -21,8 +21,8 @@ async function api(action,data){
 }
 function form(id,handler){const el=$(id);if(!el)return;el.onsubmit=async e=>{e.preventDefault();const button=$('button[type=submit],button:not([type])',el);if(button)button.disabled=true;try{await handler(Object.fromEntries(new FormData(el)),el);}catch(err){toast(err.message);}finally{if(button)button.disabled=false;}};}
 async function refresh(){state=await api('state');offset=state.server_time-Date.now();if(!course(activeCourse))activeCourse=state.courses[0]?.id||'';render();}
-function modal(title,content){$('#modal-title').textContent=title;$('#modal-content').innerHTML=content;if(!$('#modal').open)$('#modal').showModal();}
-function closeModal(){if(recoveryPending)return;$('#modal').close();}
+function modal(title,content){if(typeof feedbackModalId!=='undefined')feedbackModalId=null;$('#modal-title').textContent=title;$('#modal-content').innerHTML=content;if(!$('#modal').open)$('#modal').showModal();}
+function closeModal(){if(recoveryPending)return;$('#modal').close();if(typeof feedbackModalId!=='undefined')feedbackModalId=null;}
 $('#close-modal').onclick=closeModal;
 $('#modal').addEventListener('cancel',e=>{if(recoveryPending)e.preventDefault();});
 $('#modal').onclick=e=>{if(!recoveryPending&&e.target===$('#modal')){const b=e.target.getBoundingClientRect();if(e.clientX<b.left||e.clientX>b.right||e.clientY<b.top||e.clientY>b.bottom)closeModal();}};
@@ -60,7 +60,7 @@ function render(){
  }).join('')||`<div class="empty">${isAdmin()?'Создайте первый курс кнопкой выше':'Добавьте курс по коду, который выдал организатор'}</div>`;
  if(scheduleCourse!=='all'&&!course(scheduleCourse))scheduleCourse='all';
  $('#course-filter').innerHTML='<option value="all">Все курсы</option>'+state.courses.map(c=>`<option value="${esc(c.id)}">${esc(c.title)}</option>`).join('');$('#course-filter').value=scheduleCourse;$('#schedule-period').value=schedulePeriod;
- schedule();collection();notifications();if(isAdmin())adminPanel();if(typeof renderManagement==='function')renderManagement();
+ schedule();collection();notifications();if(isAdmin())adminPanel();if(typeof renderManagement==='function')renderManagement();if(typeof renderInbox==='function')renderInbox();
 }
 function schedule(){
  const ls=state.lessons.filter(l=>(scheduleCourse==='all'||l.course===scheduleCourse)&&(schedulePeriod==='all'||(schedulePeriod==='upcoming'?l.end>now():l.end<=now()))).sort((a,b)=>a.start-b.start||a.title.localeCompare(b.title,'ru'));
@@ -87,7 +87,10 @@ function collection(){
  const list=state.awards.length?state.awards:[0,1,2,3].map(creature=>({creature,locked:true,label:'Ваш следующий спутник'}));
  $('#reward-grid').innerHTML=list.map(a=>{const cr=creatures[a.creature??0];return `<div class="reward-card ${a.locked?'locked':''}"><img src="${a.image?image(a):'assets/'+cr[1]+'.webp'}" alt="${a.locked?'Закрытый персонаж':esc(a.name||cr[0])}"><strong>${a.locked?'? Кто-то необычный':esc(a.name||cr[0])}</strong><small>${esc(a.label)}</small></div>`;}).join('');
 }
-function notifications(){const n=state.notifications;$('#unread-count').textContent=n.filter(x=>!Number(x.is_read)).length;$('#notification-list').innerHTML=n.map(x=>`<div class="notification ${Number(x.is_read)?'':'unread'}">${esc(x.body)} <button class="text-button" data-notification="${esc(x.lesson_id)}">Открыть →</button></div>`).join('')||'<div class="empty">Здесь появятся ответы организатора и результаты проверки заданий</div>';}
+function notifications(){
+ const n=state.notifications;$('#unread-count').textContent=state.unread_count??n.filter(x=>!Number(x.is_read)).length;
+ $('#notification-list').innerHTML=n.map(x=>`<div class="notification ${Number(x.is_read)?'':'unread'}">${esc(x.body)} ${isAdmin()&&x.feedback_id?`<button class="text-button" data-feedback-open="${esc(x.feedback_id)}">Открыть отзыв →</button>`:`<button class="text-button" data-notification="${esc(x.lesson_id)}">Открыть →</button>`}</div>`).join('')||`<div class="empty">${isAdmin()?'Новые отзывы и сообщения студентов будут появляться здесь':'Здесь появятся ответы организатора и результаты проверки заданий'}</div>`;
+}
 function feedbackBody(f){return [['takeaway','Что беру в работу'],['impression','Впечатление'],['question','Вопрос'],['liked','Что понравилось'],['wishes','Чего не хватило']].filter(([k])=>f[k]).map(([k,t])=>`<p class="review-body"><b>${t}</b><br>${esc(f[k])}</p>`).join('');}
 function replies(f){return f.replies.map(r=>`<div class="reply"><b>${r.role==='admin'?'Организатор':esc(r.name)}</b><br>${esc(r.text)}</div>`).join('');}
 function ownFeedback(id){return state.feedback.find(f=>f.lesson_id===id&&String(f.user_id)===String(state.profile.id));}
@@ -150,7 +153,7 @@ $('#new-course').onclick=()=>editCourse();$('#new-lesson').onclick=()=>editLesso
 $('#nearest-lesson').onclick=e=>{e.preventDefault();if(isAdmin()){location.hash='organizer';return;}const ls=state.lessons.filter(l=>!l.cancelled).sort((a,b)=>a.start-b.start);const l=ls.find(l=>l.end>now())||ls.at(-1);if(l)openLesson(l.id);else toast('Пока нет занятий');};
 document.addEventListener('click',async e=>{const b=e.target.closest('[data-course],[data-lesson],[data-edit-course],[data-edit-lesson],[data-copy-lesson],[data-check],[data-notification]');if(!b)return;try{if(b.dataset.course)goToSchedule(b.dataset.course);if(b.dataset.lesson)openLesson(b.dataset.lesson);if(b.dataset.editCourse)editCourse(b.dataset.editCourse);if(b.dataset.editLesson)editLesson(b.dataset.editLesson);if(b.dataset.copyLesson)editLesson(b.dataset.copyLesson,true);if(b.dataset.check)checkHomework(b.dataset.student,b.dataset.check);if(b.dataset.notification){await api('read_notifications',{});await refresh();openLesson(b.dataset.notification);}}catch(err){toast(err.message);}});
 document.addEventListener('change',async e=>{if(!e.target.dataset.attendance)return;try{await api('admin_attendance',{lesson:e.target.dataset.attendance,student:e.target.dataset.student,format:e.target.value});await refresh();toast('Посещение исправлено');}catch(err){toast(err.message);await refresh();}});
-document.addEventListener('submit',async e=>{const id=e.target.dataset.reply;if(!id)return;e.preventDefault();const el=e.target,text=$('input',el).value.trim();if(!text)return;const b=$('button',el);b.disabled=true;try{const l=state.feedback.find(f=>f.id===id)?.lesson_id;await api('reply',{feedback:id,text});await refresh();if($('#modal').open&&l)openLesson(l);toast('Сообщение сохранено');}catch(err){toast(err.message);}finally{b.disabled=false;}});
+document.addEventListener('submit',async e=>{const id=e.target.dataset.reply;if(!id)return;e.preventDefault();const el=e.target,text=$('input',el).value.trim();if(!text)return;const b=$('button',el);b.disabled=true;try{const l=state.feedback.find(f=>f.id===id)?.lesson_id;const focused=typeof feedbackModalId!=='undefined'&&feedbackModalId===id;await api('reply',{feedback:id,text});if(typeof feedbackReplySent==='function')feedbackReplySent(id);await refresh();if(focused&&typeof openFeedback==='function')openFeedback(id,false);else if($('#modal').open&&l)openLesson(l);toast('Сообщение сохранено');}catch(err){toast(err.message);}finally{b.disabled=false;}});
 function renderLogin(mode='login'){
  const registration=mode==='register',recover=mode==='recover';
  $('#login-status').textContent='';
@@ -207,4 +210,4 @@ $('#export-button').onclick=()=>{
  const u=URL.createObjectURL(zip(files)),a=document.createElement('a');a.href=u;a.download='БРИДЖ_отчёт.xlsx';a.click();setTimeout(()=>URL.revokeObjectURL(u),10000);
 };
 
-setInterval(()=>{if(state&&document.visibilityState==='visible'&&!$('#modal').open&&(typeof managementDirty==='undefined'||!managementDirty))refresh().catch(e=>toast(e.message));},60000);
+setInterval(()=>{if(state&&document.visibilityState==='visible'&&!$('#modal').open&&(typeof managementDirty==='undefined'||!managementDirty)&&(typeof inboxHasDrafts!=='function'||!inboxHasDrafts()))refresh().catch(e=>toast(e.message));},60000);
