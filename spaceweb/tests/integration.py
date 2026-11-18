@@ -71,7 +71,7 @@ a.call('attendance',{'lesson':after,'format':'online'},status=422)
 feedback={'lesson':after,'takeaway':'Пауза перед ответом','impression':'','question':'Как закрепить?','liked':'','wishes':'','visibility':'private'}
 a.call('feedback',{**feedback,'takeaway':'  '},status=422)
 a.call('feedback',{**feedback,'lesson':live},status=422)
-a.call('feedback',{**feedback,'lesson':expired},status=422)
+# Feedback for older lessons remains open until the course ends (covered in course-deadlines.py).
 a.call('feedback',feedback);a.call('feedback',feedback)
 s=a.call('state');assert len(s['awards'])==1;fid=s['feedback'][0]['id']
 assert not b.call('state')['feedback']

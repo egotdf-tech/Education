@@ -26,7 +26,7 @@ function renderInbox(){
  if(deep&&deepFeedbackOpened!==deep[1]&&state.feedback.some(f=>f.id===deep[1])){deepFeedbackOpened=deep[1];setTimeout(()=>openFeedback(deep[1]),0);}
 }
 async function openFeedback(id,mark=true){
- if(!isAdmin())return;const f=state.feedback.find(f=>f.id===id);if(!f)return toast('Отзыв не найден');
+ const f=state.feedback.find(f=>f.id===id);if(!f||(!isAdmin()&&String(f.user_id)!==String(state.profile.id)))return toast('Отзыв не найден');
  preserveFeedbackDrafts();
  if(mark){try{const read=await api('read_feedback_notices',{feedback:id});state.notifications=state.notifications.map(n=>n.feedback_id===id?{...n,is_read:1}:n);state.unread_count=read.unread_count;notifications();}catch(e){toast(e.message);}}
  const l=state.lessons.find(l=>l.id===f.lesson_id);

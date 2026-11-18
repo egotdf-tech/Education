@@ -74,7 +74,7 @@ try {
   if(!$saved)fail('Задание уже проверено и закрыто для изменений');respond(['ok'=>true]);
  }
  if($action==='feedback'){
-  $l=lesson(field($input,'lesson',40,true),$u);if($l['cancelled']||clock_ms()<$l['end_at']||clock_ms()>=$l['end_at']+172800000)fail('Обратная связь принимается 48 часов после занятия');
+  $l=lesson(field($input,'lesson',40,true),$u);if($l['cancelled']||clock_ms()<$l['end_at']||clock_ms()>=$l['course_end'])fail('Обратная связь принимается после занятия до завершения курса');
   $values=[];foreach(['takeaway','impression','question','liked','wishes']as $key)$values[]=field($input,$key,5000,$key==='takeaway');
   $visibility=field($input,'visibility',10,true);if(!in_array($visibility,['public','private'],true))fail('Выберите видимость');
   transaction(function()use($u,$l,$values,$visibility){
@@ -95,7 +95,7 @@ try {
   $id=field($input,'feedback',40,true);$f=one('SELECT * FROM bridge_feedback WHERE id=?',[$id]);if(!$f)fail('Запись не найдена',404);$l=lesson($f['lesson_id'],$u);
   if($u['role']!=='admin'&&(string)$f['user_id']!==(string)$u['id'])fail('Отвечать могут автор и организатор',403);
   $text=field($input,'text',5000,true);
-  transaction(function()use($id,$u,$text,$f,$l){q('INSERT INTO bridge_replies(feedback_id,user_id,body,created_at) VALUES(?,?,?,?)',[$id,$u['id'],$text,clock_ms()]);if($u['role']==='admin')add_notification($f['user_id'],$l['id'],'Организатор ответил на ваш отзыв: '.$l['title']);else{notify_organizers($l['id'],$id,'Сообщение от студента · '.$u['name'].' · '.$l['title']);queue_telegram('Новое сообщение · '.$u['name'].' · '.$l['title']."\n".config()['base_url'].'/#review-'.$id);}});respond(['ok'=>true]);
+  transaction(function()use($id,$u,$text,$f,$l){q('INSERT INTO bridge_replies(feedback_id,user_id,body,created_at) VALUES(?,?,?,?)',[$id,$u['id'],$text,clock_ms()]);if($u['role']==='admin')add_notification($f['user_id'],$l['id'],feedback_notice_body($id,'Организатор ответил на ваш отзыв: '.$l['title']));else{notify_organizers($l['id'],$id,'Сообщение от студента · '.$u['name'].' · '.$l['title']);queue_telegram('Новое сообщение · '.$u['name'].' · '.$l['title']."\n".config()['base_url'].'/#review-'.$id);}});respond(['ok'=>true]);
  }
  if($action==='change_password'){
   rate('password-change:'.$u['id'],10,900);
@@ -118,10 +118,10 @@ try {
   });
   if(!$result)fail('Текущий пароль неверный');establish_session($result);respond(['csrf'=>$_SESSION['csrf'],'recovery_code'=>$code]);
  }
+ if($action==='read_feedback_notices'){$fid=field($input,'feedback',40,true);$f=one('SELECT user_id,lesson_id FROM bridge_feedback WHERE id=?',[$fid]);if(!$f||($u['role']!=='admin'&&(string)$f['user_id']!==(string)$u['id']))fail('Отзыв недоступен',403);lesson($f['lesson_id'],$u);read_feedback_notices($u['id'],$fid);respond(['ok'=>true,'unread_count'=>(int)q('SELECT COUNT(*) FROM bridge_notifications WHERE user_id=? AND is_read=0',[$u['id']])->fetchColumn()]);}
  // All remaining operations are explicitly administrator-only.
  admin();
  if($action==='backfill_feedback_notices'){respond(['added'=>backfill_feedback_notices($u['id'])]);}
- if($action==='read_feedback_notices'){read_feedback_notices($u['id'],field($input,'feedback',40,true));respond(['ok'=>true,'unread_count'=>(int)q('SELECT COUNT(*) FROM bridge_notifications WHERE user_id=? AND is_read=0',[$u['id']])->fetchColumn()]);}
  if($action==='upgrade_features'){
   rate('upgrade-features:'.$u['id'],5,900);
   $password=$input['current_password']??'';$credentials=one('SELECT password_hash FROM bridge_credentials WHERE user_id=?',[$u['id']]);
